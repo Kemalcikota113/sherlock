@@ -1,52 +1,68 @@
-import shutil
 import os
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import shutil
+import tempfile
+from functools import lru_cache
+
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
 from .engine import SherlockEngine
 
-app = FastAPI(title="Sherlock AI - Case File Assistant")
+app = FastAPI(title="Sherlock - Case File Assistant")
 
-# Simple, global initialization. 
-# It's easy to follow and works perfectly for this scope.
-sherlock = SherlockEngine()
+
+@lru_cache
+def get_engine() -> SherlockEngine:
+    return SherlockEngine()
+
 
 class QuestionRequest(BaseModel):
     question: str
 
-@app.post("/upload-case-file")
-async def upload_document(file: UploadFile = File(...)):
-    # 1. Simple validation
-    filename = file.filename.lower()
-    if not (filename.endswith('.pdf') or filename.endswith('.txt')):
-        raise HTTPException(status_code=400, detail="Please upload a PDF or TXT file.")
 
-    # 2. Straightforward file saving
-    temp_path = f"temp_{file.filename}"
+@app.get("/api/health")
+def health() -> dict:
+    return {"status": "ok"}
+
+
+@app.post("/api/upload")
+async def upload(file: UploadFile = File(...), engine: SherlockEngine = Depends(get_engine)) -> dict:
+
+    name = (file.filename or "").lower()
+    if not (name.endswith(".pdf") or name.endswith(".txt")):
+        raise HTTPException(400, "Only .pdf and .txt files are supported.")
+
+    with tempfile.NamedTemporaryFile(suffix=os.path.splitext(name)[1], delete=False) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
+
     try:
-        with open(temp_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # 3. Call the engine
-        sherlock.process_document(temp_path)
-        return {"message": f"Successfully indexed: {file.filename}"}
-    
-    except Exception as e:
-        # If something goes wrong, we want the detective to know
-        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
-    
+        chunks = engine.ingest(tmp_path, file.filename)
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to process file: {exc}") from exc
     finally:
-        # Always clean up the temp file, even if it crashed
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        os.remove(tmp_path)
 
-@app.post("/ask")
-async def ask_sherlock(request: QuestionRequest):
-    # The 'Catch' in the test: Ensure we don't hallucinate
-    # We pass the logic to the engine which handles the retrieval
-    result = sherlock.query(request.question)
-    
-    return {
-        "question": request.question,
-        "answer": result["answer"],
-        "sources": result["sources"]
-    }
+    return {"filename": file.filename, "chunks": chunks}
+
+
+@app.post("/api/ask")
+def ask(request: QuestionRequest, engine: SherlockEngine = Depends(get_engine)) -> dict:
+    return engine.query(request.question)
+
+
+@app.get("/api/documents")
+def list_documents(engine: SherlockEngine = Depends(get_engine)) -> dict:
+    return {"documents": engine.list_documents()}
+
+
+@app.delete("/api/documents")
+def clear_documents(engine: SherlockEngine = Depends(get_engine)) -> dict:
+    engine.clear()
+    return {"status": "cleared"}
+
+
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse("app/static/index.html")

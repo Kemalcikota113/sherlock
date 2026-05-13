@@ -1,80 +1,106 @@
 import os
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain_community.vectorstores import Chroma
+
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.prompts import PromptTemplate
+from langchain_community.vectorstores import Chroma
+from langchain_google_genai import (
+    ChatGoogleGenerativeAI,
+    GoogleGenerativeAIEmbeddings,
+    HarmBlockThreshold,
+    HarmCategory,
+)
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from .config import settings
+
+# attempt to disable geminis safety settings. I did this becauuse when i was testing
+# with a sherlock holmes story, the model refused to answer questions absout violent crimes like murders. 
+_SAFETY_OFF = {
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
+
+PROMPT = """You are Sherlock, a digital assistant for a lead detective.
+Answer the question using ONLY the evidence below.
+If the answer is not in the evidence, reply exactly:
+"I don't have enough evidence to answer that."
+Do not invent clues, alibis, or suspects.
+
+Evidence:
+{context}
+
+Question: {question}
+
+Answer:"""
+
+# main engine for sherlock RAG. has one function per API endpoint: ingest, query, list and clear.
 class SherlockEngine:
-    def __init__(self):
-        # 1. Setup Embeddings and LLM (Using Google AI Studio / Gemini)
-        # Ensure GOOGLE_API_KEY is in your environment variables
-        self.embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-        self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
-        
-        # 2. Initialize Vector Store (Persistent for Bonus points) 
-        # Data will be stored in the /data/chroma_db folder
-        self.persist_directory = "./data/chroma_db"
-        self.vector_db = Chroma(
-            persist_directory=self.persist_directory,
-            embedding_function=self.embeddings
+
+    def __init__(self, persist_directory: str = "./data/chroma_db"):
+        self.persist_directory = persist_directory
+        os.makedirs(self.persist_directory, exist_ok=True)
+
+        self.embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/gemini-embedding-001",
+            google_api_key=settings.google_api_key,
+            transport="rest",
+        )
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash-lite",
+            temperature=0,
+            google_api_key=settings.google_api_key,
+            transport="rest",
+            timeout=60,
+            safety_settings=_SAFETY_OFF,
         )
 
-    def process_document(self, file_path: str):
-        #Loads, chunks, and indexes a case file
-        # 1. Choose loader based on extension
-        if file_path.endswith('.pdf'):
-            loader = PyPDFLoader(file_path)
-        else:
-            loader = TextLoader(file_path)
-            
-        documents = loader.load()
-        
-        # 2. Chunking: Breaking text into manageable pieces for the LLM
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000, 
-            chunk_overlap=100
-        )
-        chunks = text_splitter.split_documents(documents)
-        
-        # 3. Add to vector database
+        self.vector_db = Chroma(persist_directory=self.persist_directory, embedding_function=self.embeddings)
+
+    # ingest a document, split it into chunks, and add to the vector database. returns number of chunks ingested.
+    def ingest(self, file_path: str, filename: str) -> int:
+
+
+        loader = PyPDFLoader(file_path) if file_path.lower().endswith(".pdf") else TextLoader(file_path)
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        chunks = splitter.split_documents(loader.load())
+        for chunk in chunks:
+            chunk.metadata["source"] = filename
         self.vector_db.add_documents(chunks)
-        # Chroma writes to disk automatically in newer versions, but we ensure persist
-        self.vector_db.persist()
+        return len(chunks)
 
-    def query(self, question: str):
-        # Searches for evidence and generates a strictly evidence-based answer.
-        
-        # 1. Retrieve the most relevant snippets from the case files 
-        # We fetch the top 4 most relevant chunks
+    # Retrieve top-k evidence and ask the LLM to answer strictly from it
+    def query(self, question: str) -> dict:
+
         docs = self.vector_db.similarity_search(question, k=4)
-        context = "\n\n".join([doc.page_content for doc in docs])
-        
-        # 2. Strict Prompting to prevent hallucinations 
-        template = """
-        You are Sherlock, a digital assistant for a lead detective. 
-        Your task is to answer questions based ONLY on the provided evidence.
-        
-        Rules:
-        - If the answer is not in the evidence, say: "I don't have enough evidence to answer that."
-        - Do not make up clues, alibis, or suspects.
-        - Be concise and professional.
+        if not docs:
+            return {"answer": "I don't have enough evidence to answer that.", "sources": []}
 
-        Evidence:
-        {context}
-
-        Question: {question}
-        
-        Answer:"""
-        
-        prompt = PromptTemplate.from_template(template)
-        formatted_prompt = prompt.format(context=context, question=question)
-        
-        # 3. Generate response
-        response = self.llm.invoke(formatted_prompt)
-        
-        # 4. Return answer and the document sources found
+        context = "\n\n".join(d.page_content for d in docs)
+        response = self.llm.invoke(PROMPT.format(context=context, question=question))
         return {
             "answer": response.content,
-            "sources": [doc.metadata.get("source", "Unknown") for doc in docs]
+            "sources": [
+                {
+                    "source": d.metadata.get("source", "unknown"),
+                    "page": d.metadata.get("page"),
+                    "snippet": d.page_content[:240].strip(),
+                }
+                for d in docs
+            ],
         }
+
+    # Return the unique source filenames currently indexed
+    def list_documents(self) -> list[str]:
+
+        data = self.vector_db.get()
+        return sorted({m["source"] for m in data.get("metadatas", []) if m and "source" in m})
+
+    # just wipe the vector DB.
+    def clear(self) -> None:
+        
+        self.vector_db.delete_collection()
+        self.vector_db = Chroma(
+            persist_directory=self.persist_directory,
+            embedding_function=self.embeddings,
+        )

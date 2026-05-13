@@ -1,0 +1,16 @@
+# Environment
+.env
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Data / vector store
+data/
+
+# Dev artefacts
+testfile.txt
+*.log
