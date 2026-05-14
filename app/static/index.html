@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+
+<!-- using a monolithic CDN for creating the webapp instead of react components for simplicity and readability-->
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sherlock</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23d97706' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='10.5' cy='10.5' r='6.5'/%3E%3Cline x1='20' y1='20' x2='15.3' y2='15.3'/%3E%3C/svg%3E" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+  </style>
+</head>
+
+
+
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <div class="max-w-3xl mx-auto px-6 py-10">
+    <header class="mb-8 flex items-center gap-3">
+      <svg class="w-7 h-7 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="10.5" cy="10.5" r="6.5" />
+        <line x1="20" y1="20" x2="15.3" y2="15.3" />
+      </svg>
+      <div>
+        <h1 class="text-2xl font-semibold tracking-tight">Sherlock</h1>
+        <p class="text-sm text-slate-400">Case file assistant. Answers strictly from the evidence.</p>
+      </div>
+    </header>
+
+    <!-- File upload and document list -->
+
+    <section class="mb-6 border border-slate-800 rounded-lg p-4 bg-slate-900/40">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400">Case files</h2>
+        <button id="clear" class="text-xs text-slate-500 hover:text-red-400 transition">Clear all</button>
+      </div>
+      <div class="flex items-center gap-3">
+        <input type="file" id="file" accept=".pdf,.txt"
+               class="text-sm text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:bg-slate-800 file:text-slate-200 hover:file:bg-slate-700 file:cursor-pointer" />
+        <button id="upload"
+                class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm font-medium transition">
+          Upload
+        </button>
+      </div>
+      <ul id="docs" class="mt-3 text-sm space-y-1"></ul>
+    </section>
+
+    <section class="mb-6">
+      <div class="flex gap-2">
+        <input type="text" id="question" placeholder="What was Mrs. Hudson's alibi?"
+               class="flex-1 bg-slate-900 border border-slate-800 focus:border-amber-600 focus:outline-none rounded px-3 py-2 text-sm" />
+        <button id="ask"
+                class="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm font-medium transition">
+          Ask
+        </button>
+      </div>
+    </section>
+
+    <section id="answer-block" class="hidden">
+      <div id="answer" class="bg-slate-900 border border-slate-800 rounded-lg p-4 mb-4 leading-relaxed"></div>
+      <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Evidence</h3>
+      <ul id="sources" class="space-y-3"></ul>
+    </section>
+  </div>
+
+
+  <script>
+
+    // Helper to get elements by ID
+    const $ = (id) => document.getElementById(id);
+
+    async function api(path, opts = {}) {
+      const res = await fetch(`/api${path}`, opts);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || res.statusText);
+      return data;
+    }
+
+    // Load and display the list of uploaded documents
+    async function refreshDocs() {
+      const { documents } = await api("/documents");
+      $("docs").innerHTML = documents.length
+        ? documents.map(d => `<li class="text-slate-300">· ${d}</li>`).join("")
+        : '<li class="text-slate-500 italic">No case files yet.</li>';
+    }
+
+    // Event handlers
+    $("upload").onclick = async () => {
+      const file = $("file").files[0];
+      if (!file) return;
+      const form = new FormData();
+      form.append("file", file);
+      $("upload").disabled = true;
+      try {
+        await api("/upload", { method: "POST", body: form });
+        $("file").value = "";
+        await refreshDocs();
+      } catch (e) {
+        alert(e.message);
+      } finally {
+        $("upload").disabled = false;
+      }
+    };
+
+    // Clear all documents with confirmation
+    $("clear").onclick = async () => {
+      if (!confirm("Wipe all indexed case files?")) return;
+      await api("/documents", { method: "DELETE" });
+      $("answer-block").classList.add("hidden");
+      await refreshDocs();
+    };
+
+    // Ask the question and display the answer with sources
+    $("ask").onclick = async () => {
+      const q = $("question").value.trim();
+      if (!q) return;
+      $("ask").disabled = true;
+      $("answer").innerHTML = '<span class="text-slate-500 italic">Investigating…</span>';
+      $("sources").innerHTML = "";
+      $("answer-block").classList.remove("hidden");
+      try {
+        const data = await api("/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: q }),
+        });
+        $("answer").textContent = data.answer;
+        $("sources").innerHTML = data.sources.length
+          ? data.sources.map(s => `
+              <li class="border-l-2 border-amber-700/60 pl-3">
+                <div class="text-xs text-amber-500">${s.source}${s.page != null ? ' · page ' + (s.page + 1) : ''}</div>
+                <div class="mono text-xs text-slate-400 mt-1 whitespace-pre-wrap">${s.snippet}…</div>
+              </li>`).join("")
+          : '<li class="text-slate-500 italic text-sm">No evidence retrieved.</li>';
+      } catch (e) {
+        $("answer").textContent = "Error: " + e.message;
+      } finally {
+        $("ask").disabled = false;
+      }
+    };
+
+    // Allow pressing Enter to submit the question
+    $("question").addEventListener("keydown", e => {
+      if (e.key === "Enter") $("ask").click();
+    });
+
+    refreshDocs();
+  </script>
+</body>
+</html>
