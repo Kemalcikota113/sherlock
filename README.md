@@ -1,6 +1,6 @@
 # Sherlock
 
-A RAG-powered assistant for detectives. Upload case files (PDF or text) and ask questions about them. Answers are strictly grounded in the uploaded documents — if the answer isn't there, Sherlock says so.
+A RAG-powered assistant for detectives. Upload case files (PDF or text) and ask questions about them. Answers are strictly grounded in the uploaded documents, if the answer isn't there, Sherlock says so.
 
 ## How it works
 
